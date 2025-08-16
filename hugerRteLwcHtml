@@ -1,0 +1,5 @@
+<template>
+<div class="editor">
+      <div lwc:dom="manual" class="editor-container"></div>
+    </div>
+</template>
