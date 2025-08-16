@@ -1,0 +1,185 @@
+import { loadStyle,loadScript } from "lightning/platformResourceLoader";
+import HUGERTE from '@salesforce/resourceUrl/HugeRTE_Editor';
+export default class SvEmailComposerHugeRteEditor extends LightningElement {
+editor; 
+_value = ''; 
+
+renderedCallback() {
+  if (!this.editor) {
+    this.simpletask();
+  }
+}
+
+simpletask(){
+  try {
+    // If already patched, skip
+    if (window._hugerteEventsPatched) {
+      this.initializeEditor();
+      return;
+    }
+    window._hugerteEventsPatched = true;
+
+    // --- BEGIN ShadowRoot-safe patch ---
+    // Keep originals
+    const origSRAdd = window.ShadowRoot && window.ShadowRoot.prototype && window.ShadowRoot.prototype.addEventListener;
+    const origSRRemove = window.ShadowRoot && window.ShadowRoot.prototype && window.ShadowRoot.prototype.removeEventListener;
+
+    if (origSRAdd && origSRRemove) {
+      // Map to keep track of wrapped listeners for `once` so removeEventListener works
+      const onceWrapperMap = new WeakMap();
+      // Patch addEventListener on ShadowRoot
+      window.ShadowRoot.prototype.addEventListener = function(type, listener, options) {
+        try {
+          // If options is an object, we must not pass an options object to ShadowRoot (LWS restriction).
+          if (options && typeof options === 'object') {
+            // Handle `{ once: true }` by wrapping listener so it auto-removes after first invocation.
+            if (options.once) {
+              // Create wrapper that removes itself and calls original listener
+              const wrapper = function(event) {
+                try {
+                  // call original listener
+                  listener.call(this, event);
+                } finally {
+                  // remove the wrapper (use original remove to ensure native cleanup)
+                  try { origSRRemove.call(this, type, wrapper); } catch (e) {  }
+                }
+              };
+              // store wrapper so removeEventListener(originalListener) will remove wrapper too
+              let map = onceWrapperMap.get(listener);
+              if (!map) {
+                map = new Map();
+                onceWrapperMap.set(listener, map);
+              }
+              map.set(type, wrapper);
+
+              // Call native addEventListener WITHOUT options argument (only type + listener)
+              return origSRAdd.call(this, type, wrapper);
+            } else {
+              // options is object but not 'once' — call with only (type, listener)
+              return origSRAdd.call(this, type, listener);
+            }
+          }
+
+          // If options is boolean or undefined — ShadowRoot disallows any options argument,
+          // so call native add with only two args
+          return origSRAdd.call(this, type, listener);
+        } catch (err) {
+          // fallback to original call style if something unexpected happens
+          try { return origSRAdd.call(this, type, listener); } catch (e) { }
+        }
+      };
+
+      // Patch removeEventListener so callers who pass the original listener still work
+      window.ShadowRoot.prototype.removeEventListener = function(type, listener, options) {
+        try {
+          // If we have a wrapper stored for this original listener + type, remove wrapper
+          const map = onceWrapperMap.get(listener);
+          if (map && map.has(type)) {
+            const wrapper = map.get(type);
+            try { origSRRemove.call(this, type, wrapper); } catch (e) {  }
+            map.delete(type);
+            if (map.size === 0) onceWrapperMap.delete(listener);
+            return;
+          }
+          // Otherwise call native remove with only (type, listener)
+          return origSRRemove.call(this, type, listener);
+        } catch (err) {
+          try { return origSRRemove.call(this, type, listener); } catch (e) {  }
+        }
+      };
+    }
+    // --- END ShadowRoot-safe patch ---
+
+    // Continue to initialize editor (patch executed BEFORE we load hugerte)
+    this.initializeEditor();
+  } catch (err) {
+    // Never throw — fallback to trying to initialize the editor anyway
+    console.warn('Could not patch ShadowRoot event listeners; continuing initialization', err);
+    this.initializeEditor();
+  }
+}
+
+async initializeEditor() {
+  try {
+    const container = this.template.querySelector('.editor-container');
+    if (!container) {
+      console.error('Editor container not found');
+      return;
+    }
+
+    // Create textarea target
+    container.innerHTML = '<textarea></textarea>';
+    const textarea = container.querySelector('textarea');
+
+    // Load styles first
+    await Promise.all([
+      loadStyle(this, HUGERTE + '/hugerte/skins/ui/oxide/content.min.css').catch(e => console.warn('Content CSS load failed:', e)),
+      loadStyle(this, HUGERTE + '/hugerte/skins/ui/oxide/skin.min.css').catch(e => console.warn('Skin CSS load failed:', e))
+    ]);
+
+    // Now load hugerte script (the ShadowRoot patch above must run before this)
+    await loadScript(this, HUGERTE + '/hugerte/hugerte.min.js').catch(err => {
+      console.error('Error loading hugerte.min.js', err);
+      throw err;
+    });
+
+    // Optional: load theme JS if required by the editor (uncomment if present)
+    // await loadScript(this, HUGERTE + '/hugerte/themes/silver/theme.min.js').catch(e => console.warn('theme load failed', e));
+
+    // Ensure textarea is ready for initialization
+    if (!textarea || !textarea.isConnected) {
+      console.error('Textarea not ready for initialization');
+      return;
+    }
+
+    // Initialize HugeRTE
+    window.hugerte.init({
+      target: textarea,
+      skin_url: HUGERTE + '/hugerte/skins/ui/oxide',
+      content_css: HUGERTE + '/hugerte/skins/ui/oxide/content.min.css',
+      theme_url: HUGERTE + '/hugerte/themes/silver/theme.min.js',
+      height: 300,
+      menubar: false,
+      plugins: 'lists link image table code help',
+      toolbar: 'undo redo | formatselect | bold italic | alignleft aligncenter alignright | bullist numlist | table | link image | code | help',
+      init_instance_callback: (editor) => {
+        this.editor = editor;
+        if (this._value) editor.setContent(this._value);
+
+        // Keep events to a minimum; use editor API rather than DOM event manipulations
+        editor.on('change', () => {
+          this._value = editor.getContent();
+          this.dispatchEvent(new CustomEvent('change', { detail: { value: this._value } }));
+        });
+
+        this.dispatchEvent(new CustomEvent('load'));
+      }
+    });
+
+  } catch (error) {
+    console.error('HugeRTE initialization failed:', error);
+  }
+}
+
+
+
+disconnectedCallback() {
+    if (this.editor) {
+        this.editor.remove();
+        this.editor = null;
+    }
+}
+
+@api focus() {
+    if (this.editor) this.editor.focus();
+}
+
+@api getContent() {
+    return this.editor ? this.editor.getContent() : this._value;
+}
+        }
+
+@api setContent(content) {
+    this._value = content || '';
+    if (this.editor) this.editor.setContent(this._value);
+}
